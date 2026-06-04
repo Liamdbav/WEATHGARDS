@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Env
+.env
+
+# TLS certificates — keep the directory structure, ignore actual key material
+certs/*
+!certs/.gitkeep
+
+# Frontend build artefacts
+frontend/node_modules/
+frontend/dist/
+frontend/tmp/
+
+# Editor
+.*.swp
+.DS_Store

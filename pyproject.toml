@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weathgards"
+version = "1.0.0"
+description = "Passerelle MCP locale multi-OS pour containers Docker, processus et services"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    # Validation
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    # MCP server (official SDK, HTTP/SSE streamable transport)
+    "mcp>=1.9.0",
+    # Docker scanner (handles Unix socket + Windows named pipe)
+    "docker>=7.1.0",
+    # Cross-OS process scanner
+    "psutil>=6.1.0",
+    # Cross-OS config paths (never hardcode ~/.config)
+    "platformdirs>=4.3.0",
+    # Async HTTP client (for internal health checks)
+    "httpx>=0.27.0",
+    # Structured logging
+    "structlog>=24.4.0",
+    # Environment file loader
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+weathgards = "weathgards.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.27.0",   # AsyncClient for FastAPI tests
+    # Type checking
+    "mypy>=1.13.0",
+    "types-psutil>=6.1.0",
+    "types-docker>=7.0.0",
+    # Linting / formatting
+    "ruff>=0.8.0",
+]
+
+# ---------------------------------------------------------------------------
+# Hatch build config
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/weathgards"]
+
+# Bundle the pre-built React frontend under weathgards/web/ in the wheel.
+# Build the frontend first: cd frontend && npm run build
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/dist" = "weathgards/web"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "frontend/",
+    "tests/",
+    "pyproject.toml",
+    "README.md",
+    ".env.example",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "C4",       # flake8-comprehensions
+    "SIM",      # flake8-simplify
+    "TCH",      # flake8-type-checking
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "E501",  # line-length handled by formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["weathgards"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# Mypy – strict mode
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["docker.*", "psutil.*", "mcp.*", "structlog.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=weathgards --cov-report=term-missing --cov-report=html"

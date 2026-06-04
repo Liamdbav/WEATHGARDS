@@ -144,6 +144,7 @@ weathgards (processus unique)
 │   │   ├── POST /api/mcp/start
 │   │   ├── POST /api/mcp/stop
 │   │   ├── GET  /api/mcp/status
+│   │   ├── GET  /api/mcp/snippets
 │   │   ├── GET  /api/mcp/connection-info
 │   │   ├── GET  /api/settings
 │   │   └── PUT  /api/settings
@@ -174,8 +175,8 @@ weathgards (processus unique)
 | `auth.py` | `BearerAuthMiddleware` — validation du token sur chaque requête `/mcp` |
 | `tools/catalog.py` | Catalogue statique des outils disponibles + `HANDLER_MAP` |
 | `tools/registry.py` | `ToolRegistry` — registre en mémoire des activations (outil, cible) |
-| `tools/docker_tools.py` | Handlers Docker : logs container, inspection, stats |
-| `tools/process_tools.py` | Handlers processus : infos, logs, arbre de processus |
+| `tools/docker_tools.py` | Handlers Docker : `docker_container_status`, `docker_container_logs`, `docker_list_containers` |
+| `tools/process_tools.py` | Handler processus : `process_status` (CPU, mémoire RSS, ports en écoute) |
 
 #### API (`src/weathgards/api/`)
 
@@ -184,7 +185,7 @@ weathgards (processus unique)
 | `app.py` | Factory FastAPI, CORS, lifespan |
 | `routes/scan.py` | `GET /api/health`, `GET /api/scan` |
 | `routes/tools.py` | Catalogue, activation, désactivation, test |
-| `routes/server.py` | Contrôle du serveur MCP (start/stop/status/connection-info) |
+| `routes/server.py` | Contrôle du serveur MCP (start/stop/status/snippets/connection-info) |
 | `routes/settings.py` | Lecture et écriture des paramètres runtime |
 | `static.py` | Montage du bundle React + fallback SPA |
 
@@ -274,15 +275,17 @@ L'interface est une **Single Page Application React** servie depuis le même pro
 
 ### 2.5 Sécurité réseau
 
-WEATHGARDS applique **deux couches de protection** cumulatives lorsque le serveur MCP est exposé sur le réseau local :
+WEATHGARDS applique **trois couches de protection** cumulatives lorsque le serveur MCP est exposé sur le réseau local :
 
 #### Couche 1 — Token Bearer
 
+Le token MCP est **auto-généré** au premier démarrage avec `secrets.token_urlsafe(32)` et persisté dans `<config_dir>/mcp.token` (permissions `600`). Il est affiché une seule fois dans les logs au niveau `INFO` pour que l'opérateur puisse le copier.
+
 Chaque requête adressée à `/mcp` doit porter l'en-tête :
 ```
-Authorization: Bearer <WEATHGARDS_MCP_TOKEN>
+Authorization: Bearer <token>
 ```
-Sans ce token valide, la requête est rejetée avec HTTP 401. Le serveur **refuse de démarrer en mode réseau** si aucun token n'est configuré.
+Sans ce token valide, la requête est rejetée avec HTTP 401 (comparaison en temps constant pour éviter les attaques timing). Le serveur **refuse de démarrer en mode réseau** si le token store est vide.
 
 #### Couche 2 — Liste blanche IP (optionnelle)
 
@@ -292,6 +295,14 @@ La variable `WEATHGARDS_ALLOWED_CLIENTS` accepte une liste de plages CIDR. Si re
 # Exemple : autoriser uniquement le sous-réseau local 192.168.1.0/24
 WEATHGARDS_ALLOWED_CLIENTS=192.168.1.0/24
 ```
+
+#### Couche 3 — Rate limiting
+
+`BearerAuthMiddleware` applique un compteur glissant de **60 requêtes par tranche de 60 secondes** par adresse IP cliente. Les requêtes en excès reçoivent HTTP 429 avec un en-tête `Retry-After`.
+
+#### TLS (optionnel)
+
+Si les fichiers `WEATHGARDS_TLS_CERT_FILE` et `WEATHGARDS_TLS_KEY_FILE` sont définis et accessibles au démarrage du serveur MCP, uvicorn démarre en HTTPS. Utiliser `scripts/generate-cert.sh <IP_LOCALE>` pour générer un certificat autosigné.
 
 #### Principe de lecture seule
 
@@ -616,13 +627,16 @@ Le fichier `.env` (à la racine du projet) contrôle les paramètres de démarra
 | `WEATHGARDS_HOST` | `127.0.0.1` | Adresse d'écoute de l'interface cockpit |
 | `WEATHGARDS_PORT` | `8765` | Port de l'interface cockpit |
 | `WEATHGARDS_ENV` | `development` | `development` ou `production` (désactive `/docs` en prod) |
-| `WEATHGARDS_MCP_TOKEN` | `CHANGE_ME` | Token Bearer pour le serveur MCP — **à changer impérativement** |
+| `WEATHGARDS_MCP_TOKEN` | `CHANGE_ME` | Réservé — non utilisé à ce stade. Le token MCP est **auto-généré** au premier démarrage et stocké dans `<config_dir>/mcp.token` |
 | `WEATHGARDS_ALLOWED_CLIENTS` | *(vide)* | Plages CIDR autorisées, séparées par des virgules. Vide = pas de restriction IP |
 | `WEATHGARDS_DOCKER_HOST` | *(auto)* | URI du socket Docker (ex. `unix:///var/run/docker.sock`) |
 | `WEATHGARDS_DOCKER_TIMEOUT` | `10` | Timeout des appels Docker en secondes |
 | `WEATHGARDS_SCAN_INTERVAL` | `30` | Intervalle de scan automatique en secondes |
 | `WEATHGARDS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 | `WEATHGARDS_LOG_FORMAT` | `console` | `console` (lisible) ou `json` (pour ingestion par ELK/Loki) |
+| `WEATHGARDS_TLS_CERT_FILE` | *(vide)* | Chemin vers le certificat TLS (ex. `certs/weathgards.crt`). Si défini avec `TLS_KEY_FILE`, le serveur MCP démarre en HTTPS |
+| `WEATHGARDS_TLS_KEY_FILE` | *(vide)* | Chemin vers la clé privée TLS (ex. `certs/weathgards.key`) |
+| `WEATHGARDS_PROCESS_INCLUDE_PATTERNS` | *(vide)* | Patterns de noms de processus à inclure dans le scan, séparés par des virgules. Vide = tous les processus visibles |
 
 #### Paramètres runtime (sans redémarrage)
 
@@ -656,6 +670,15 @@ Le catalogue est fixe et défini dans `src/weathgards/mcp_server/tools/catalog.p
 
 - Interface : onglet **Dashboard** → cliquer sur une carte service → volet "Outils MCP disponibles"
 - API : `GET /api/catalog`
+
+Outils disponibles dans la version actuelle :
+
+| Nom | Cible | Description |
+|-----|-------|-------------|
+| `docker_container_status` | Container Docker | Statut, santé, image, code de sortie, timestamps |
+| `docker_container_logs` | Container Docker | Dernières lignes de logs avec timestamps (paramètre `lines`, défaut 50, max 500) |
+| `docker_list_containers` | *(aucune)* | Liste tous les containers (actifs et arrêtés) avec nom, image, statut |
+| `process_status` | Processus | CPU %, mémoire RSS (Mo), ports en écoute, statut — par nom ou PID |
 
 #### Activer un outil
 
@@ -691,6 +714,8 @@ Aller sur l'onglet **Outils MCP** → cliquer l'icône poubelle de l'outil conce
 1. Onglet **Serveur** → démarrer le serveur avec l'option réseau activée.
 2. Section **"Informations de connexion"** → copier l'URL et le token.
 
+L'API expose également `GET /api/mcp/snippets` qui retourne des extraits de configuration prêts à l'emploi pour tous les clients supportés (Claude Desktop, OpenCode, curl), que le serveur soit démarré ou non.
+
 #### Configuration Claude Desktop
 
 Éditer le fichier de configuration Claude Desktop :
@@ -701,23 +726,41 @@ Aller sur l'onglet **Outils MCP** → cliquer l'icône poubelle de l'outil conce
     "weathgards": {
       "url": "http://192.168.1.42:9766/mcp",
       "headers": {
-        "Authorization": "Bearer wg-votre-token-ici"
+        "Authorization": "Bearer votre-token"
       }
     }
   }
 }
 ```
 
+> Si TLS est activé, remplacer `http://` par `https://`.
+
 Chemins du fichier de configuration :
 - **macOS** : `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows** : `%APPDATA%\Claude\claude_desktop_config.json`
 - **Linux** : `~/.config/Claude/claude_desktop_config.json`
 
+#### Configuration OpenCode
+
+```json
+{
+  "mcp": {
+    "weathgards": {
+      "type": "remote",
+      "url": "http://192.168.1.42:9766/mcp",
+      "headers": {
+        "Authorization": "Bearer votre-token"
+      }
+    }
+  }
+}
+```
+
 #### Test de la connexion (curl)
 
 ```bash
 curl -X POST http://192.168.1.42:9766/mcp \
-  -H "Authorization: Bearer wg-votre-token" \
+  -H "Authorization: Bearer votre-token" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 ```
@@ -807,14 +850,22 @@ Test-Path "\\.\pipe\docker_engine"
 
 #### Erreur : "Cannot expose MCP server on the network without a configured token"
 
-Le token Bearer n'est pas configuré (valeur `CHANGE_ME` ou vide).
+Le fichier de token `<config_dir>/mcp.token` est absent ou vide. Ce fichier est normalement **auto-généré** au premier démarrage — il ne devrait pas manquer sauf suppression manuelle.
+
+Pour le régénérer, supprimer le fichier et redémarrer WEATHGARDS :
 
 ```bash
-# Générer un token sécurisé
-python3 -c "import secrets; print('wg-' + secrets.token_hex(32))"
+# Linux
+rm ~/.local/share/weathgards/mcp.token
+
+# macOS
+rm ~/Library/Application\ Support/weathgards/mcp.token
+
+# Windows PowerShell
+Remove-Item "$env:LOCALAPPDATA\weathgards\weathgards\mcp.token"
 ```
 
-Copier la valeur générée dans `.env` sous `WEATHGARDS_MCP_TOKEN=`, puis **redémarrer WEATHGARDS**.
+Le nouveau token sera affiché dans les logs au niveau `INFO` au prochain démarrage.
 
 #### Erreur : "Port is already in use" / code 503
 
